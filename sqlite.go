@@ -266,8 +266,14 @@ func (conn *Conn) Prep(query string) *Stmt {
 // https://www.sqlite.org/c3ref/prepare.html
 func (conn *Conn) Prepare(query string) (*Stmt, error) {
 	if stmt := conn.stmts[query]; stmt != nil {
-		stmt.Reset()
-		stmt.ClearBindings()
+		err := stmt.Reset()
+		if err != nil {
+			return nil, err
+		}
+		err = stmt.ClearBindings()
+		if err != nil {
+			return nil, err
+		}
 		return stmt, nil
 	}
 	stmt, trailingBytes, err := conn.prepare(query, C.SQLITE_PREPARE_PERSISTENT)
@@ -275,7 +281,10 @@ func (conn *Conn) Prepare(query string) (*Stmt, error) {
 		return nil, err
 	}
 	if trailingBytes != 0 {
-		stmt.Finalize()
+		err := stmt.Finalize()
+		if err != nil {
+			return nil, err
+		}
 		return nil, reserr("Conn.Prepare", query, "statement has trailing bytes", C.SQLITE_ERROR)
 	}
 	conn.stmts[query] = stmt
@@ -446,12 +455,27 @@ func (stmt *Stmt) Finalize() error {
 //
 // https://www.sqlite.org/c3ref/reset.html
 func (stmt *Stmt) Reset() error {
-	stmt.conn.count++
-	if err := stmt.interrupted("Stmt.Reset"); err != nil {
-		return err
+	for {
+		stmt.conn.count++
+		if err := stmt.interrupted("Stmt.Reset"); err != nil {
+			return err
+		}
+
+		switch res := C.sqlite3_reset(stmt.stmt); uint8(res) { // reduce to non-extended error code
+		case C.SQLITE_LOCKED:
+			if res == C.SQLITE_LOCKED_SHAREDCACHE {
+				if res := C.wait_for_unlock_notify(stmt.conn.conn, stmt.conn.unlockNote); res != C.SQLITE_OK {
+					return stmt.conn.reserr("Stmt.Reset(Wait)", stmt.query, res)
+				}
+				continue
+			}
+			fallthrough
+		case C.SQLITE_OK:
+			return nil
+		default:
+			return stmt.conn.extreserr("Stmt.Reset", stmt.query, res)
+		}
 	}
-	res := C.sqlite3_reset(stmt.stmt)
-	return stmt.conn.reserr("Stmt.Reset", stmt.query, res)
 }
 
 // ClearBindings clears all bound parameter values on a statement.
@@ -507,11 +531,18 @@ func (stmt *Stmt) Step() (rowReturned bool, err error) {
 		}
 		switch res := C.sqlite3_step(stmt.stmt); uint8(res) { // reduce to non-extended error code
 		case C.SQLITE_LOCKED:
-			if res := C.wait_for_unlock_notify(stmt.conn.conn, stmt.conn.unlockNote); res != C.SQLITE_OK {
-				return false, stmt.conn.reserr("Stmt.Step(Wait)", stmt.query, res)
+			if res == C.SQLITE_LOCKED_SHAREDCACHE {
+				if res := C.wait_for_unlock_notify(stmt.conn.conn, stmt.conn.unlockNote); res != C.SQLITE_OK {
+					return false, stmt.conn.reserr("Stmt.Step(Wait)", stmt.query, res)
+				}
+				err := stmt.Reset()
+				if err != nil {
+					return false, err
+				}
+				// loop
+				continue
 			}
-			C.sqlite3_reset(stmt.stmt)
-			// loop
+			fallthrough
 		case C.SQLITE_ROW:
 			return true, nil
 		case C.SQLITE_DONE:

@@ -302,10 +302,10 @@ func TestPatchsetApply(t *testing.T) {
 	}
 
 	// Second application of patchset should fail.
-	haveConflict := false
+	// haveConflict := false
 	conflictFn = func(ct sqlite.ConflictType, iter sqlite.ChangesetIter) sqlite.ConflictAction {
 		if ct == sqlite.SQLITE_CHANGESET_CONFLICT {
-			haveConflict = true
+			// haveConflict = true
 		} else {
 			t.Errorf("unexpected conflict type: %v", ct)
 		}
