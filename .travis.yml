@@ -10,3 +10,7 @@ os:
 
 go_import_path: crawshaw.io/sqlite
 
+install:
+  - go get -t -v crawshaw.io/iox
+  - go get -t -v ./...
+
